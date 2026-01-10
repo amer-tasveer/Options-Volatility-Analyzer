@@ -40,34 +40,27 @@ class Analyzer(TKMT.ThemedTKinterFrame):
         self.main_canvas = tk.Canvas(self.root, highlightthickness=0)
         self.main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # 2. Add Scrollbar to the Canvas
         self.scrollbar = ttk.Scrollbar(self.root, orient=tk.VERTICAL, command=self.main_canvas.yview)
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.main_canvas.configure(yscrollcommand=self.scrollbar.set)
 
-        # 3. Create the ACTUAL frame that will hold all content
         self.scrollable_content = ttk.Frame(self.main_canvas, padding="15")
         
-        # Place the content frame inside the canvas
         self.canvas_window = self.main_canvas.create_window((0, 0), window=self.scrollable_content, anchor="nw")
 
-        # 4. Bind resizing events to update scroll region
         self.scrollable_content.bind("<Configure>", self._on_frame_configure)
         self.main_canvas.bind("<Configure>", self._on_canvas_configure)
         
-        # Optional: Mouse wheel support
         self.main_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
         self.scrollable_content.columnconfigure(0, weight=1) # Left
         self.scrollable_content.columnconfigure(1, weight=1) # Middle
         self.scrollable_content.columnconfigure(2, weight=2) # Right
 
-        # Title Label
         title_label = ttk.Label(self.scrollable_content, text="Options Volatility Analyzer", font=("Helvetica", 16, "bold"))
         title_label.grid(row=0, column=0, columnspan=3, pady=(0,20))
 
-        # Left Column
         left_frame = ttk.Frame(self.scrollable_content)
         left_frame.grid(row=1, column=0, sticky="nsew", padx=10)
         self.setup_connection_section(left_frame, 0)
@@ -418,6 +411,8 @@ class Analyzer(TKMT.ThemedTKinterFrame):
         if yz_series is not None:
             latest_yz = yz_series.iloc[-1]
             self.stock_data['yz_vol'] = yz_series # Store it for plotting
+
+            self.stock_data['vrp']=self.equity_iv['iv']-self.stock_data['yz_vol']
             self.log_message(f"YZ Historical Vol (30d): {latest_yz*100:.2f}%")
 
         self.stock_data['kurtosis'] = log_returns.rolling(window=30).kurt()
@@ -618,34 +613,58 @@ class Analyzer(TKMT.ThemedTKinterFrame):
 
         import matplotlib.dates as mdates
 
+        plt.ion()
+
         self.ax_iv_rv.clear()
         self.ax_kurt.clear()
         self.ax_vix.clear()
 
-        self.ax_iv_rv.set_xlabel("Implied Volatility")
-        self.ax_iv_rv.set_ylabel("Date")
-        self.ax_iv_rv.set_title("Implied Volatility vs Realised Volitility")
-        self.ax_iv_rv.legend()
-        self.ax_iv_rv.grid(True, alpha=.3)
 
+        combined = pd.concat([
+            self.equity_iv['iv'], 
+            self.stock_data['yz_vol']
+        ], axis=1).dropna()
+        combined.columns = ['IV', 'RV']
+        combined['VRP'] = combined['IV'] - combined['RV']
+
+        colors = ['green' if v >= 0 else 'red' for v in combined['VRP']]
+
+        # Bar chart for VRP
+        bars = self.ax_iv_rv.bar(
+            combined.index, 
+            combined['VRP'], 
+            width=0.8, 
+            color=colors, 
+            alpha=0.8, 
+            label='VRP (IV - RV)'
+        )
+
+
+        self.ax_iv_rv.axhline(0, color='white', linestyle='--', linewidth=1, alpha=0.7)
+
+        self.ax_iv_rv.axhline(0.03, color='green', linestyle=':', alpha=0.7, label='+3% Rich')
+        self.ax_iv_rv.axhline(0.05, color='darkgreen', linestyle='--', alpha=0.7, label='+5% Very Rich')
+
+        current_vrp = combined['VRP'].iloc[-1] * 100
+        self.ax_iv_rv.set_title(f"Volatility Risk Premium (Current: {current_vrp:+.2f}%)")
+        self.ax_iv_rv.set_ylabel("VRP (Annualized Decimal)")
+        self.ax_iv_rv.legend()
+        self.ax_iv_rv.grid(True, alpha=0.3)
 
         self.ax_iv_rv.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
         self.ax_iv_rv.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
         self.ax_iv_rv.tick_params(axis='x', rotation=45)
 
-        self.ax_iv_rv.plot(self.stock_data.index, self.stock_data["yz_vol"], color='red', linewidth=2, label=f"Realised Volitility")
-        self.ax_iv_rv.plot(self.equity_iv.index, self.equity_iv["iv"],  color='blue', linewidth=2, label=f"Implied Volitility")
-
+        vrp_percentile = stats.percentileofscore(combined['VRP'] * 100, current_vrp)
+        self.log_message(f"Current VRP: {current_vrp:+.2f}% (Percentile: {vrp_percentile:.0f}%)")
         kurt_series = self.stock_data['kurtosis'].dropna()
         
         if not kurt_series.empty:
             self.ax_kurt.plot(kurt_series.index, kurt_series, color='#ff9900', label='30D Excess Kurtosis')
             
-            # Benchmark lines
             self.ax_kurt.axhline(y=0, color='white', linestyle='--', alpha=0.5, label='Normal Dist')
             self.ax_kurt.axhline(y=3, color='red', linestyle=':', alpha=0.7, label='High Risk (Fat Tails)')
             
-            # Highlight current value
             current_kurt = kurt_series.iloc[-1]
             self.ax_kurt.scatter(kurt_series.index[-1], current_kurt, color='red', s=100, zorder=5)
             
@@ -654,7 +673,6 @@ class Analyzer(TKMT.ThemedTKinterFrame):
             self.ax_kurt.legend(loc='upper left', fontsize='small')
             self.ax_kurt.grid(True, alpha=.3)
             
-            # Format dates
             self.ax_kurt.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
             self.ax_kurt.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
             self.ax_kurt.tick_params(axis='x', rotation=45)
